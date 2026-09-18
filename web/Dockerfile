@@ -5,16 +5,15 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 
-# Vite inlines env vars at build time, so EVERY ``VITE_*`` we want in the
-# bundle must be threaded through ARG → ENV here AND added to
-# ``docker-compose.yml`` web.build.args. Single source of truth = root
-# ``.env`` for the whole stack; no need for a ``web/.env.local`` file.
-ARG VITE_API_URL=http://localhost:8000
-ENV VITE_API_URL=${VITE_API_URL}
-ARG VITE_BEEVER_API_KEY=
-ENV VITE_BEEVER_API_KEY=${VITE_BEEVER_API_KEY}
-ARG VITE_BEEVER_ADMIN_TOKEN=
-ENV VITE_BEEVER_ADMIN_TOKEN=${VITE_BEEVER_ADMIN_TOKEN}
+# Vite inlines env vars at build time, but this image is built once and run in
+# many environments. So we build with sentinel placeholders (``__VITE_*__``)
+# and rewrite them from the container's runtime environment on boot via
+# ``env.sh`` (copied into /docker-entrypoint.d/ below). Add a new ``VITE_*`` var
+# here and it is picked up automatically at runtime — no compose build args.
+# Values MUST be supplied at runtime via Docker ``-e`` / compose ``environment:``.
+ENV VITE_API_URL=__VITE_API_URL__
+ENV VITE_BEEVER_API_KEY=__VITE_BEEVER_API_KEY__
+ENV VITE_BEEVER_ADMIN_TOKEN=__VITE_BEEVER_ADMIN_TOKEN__
 
 RUN npm run build
 
@@ -24,7 +23,14 @@ FROM nginxinc/nginx-unprivileged:alpine@sha256:85bcbc6b2edd325462560c597d784ecee
 # listen on port 8080 by default. Avoids fragile manual chown of /var/cache/nginx,
 # /var/run, /etc/nginx/conf.d that breaks across nginx version bumps. The host-side
 # port mapping in docker-compose is updated atomically (3000:80 → 3000:8080).
-COPY --from=build /app/dist /usr/share/nginx/html
+# Own the assets as the unprivileged runtime user (UID 101) so env.sh can
+# rewrite the __VITE_*__ sentinels in place at container start (sed -i needs
+# write access to the files and their directory).
+COPY --from=build --chown=101:101 /app/dist /usr/share/nginx/html
+# Runtime env injection: the official nginx entrypoint executes every script in
+# /docker-entrypoint.d/ before launching nginx. env.sh rewrites the __VITE_*__
+# sentinels baked into the bundle with values from the container environment.
+COPY --chmod=755 env.sh /docker-entrypoint.d/40-env.sh
 COPY <<'EOF' /etc/nginx/conf.d/default.conf
 server {
     listen 8080;

@@ -27,7 +27,14 @@ The web app reads env from the **root `.env`** (via Vite's `envDir`). There is n
 | `VITE_BEEVER_API_KEY` | Bearer token injected into every `/api/*` request |
 | `VITE_BEEVER_ADMIN_TOKEN` | Admin token for `/api/dev/*` calls |
 
-> **Note**: Vite inlines these values at build time. They are visible in the browser bundle — treat `VITE_BEEVER_API_KEY` as a low-privilege read-only key.
+> **Note**: for `npm run dev` / `npm run build` these come from the root `.env`
+> at build time. In the **Docker image** they are injected at *runtime* instead:
+> the bundle is built with `__VITE_*__` placeholders and [`env.sh`](./env.sh)
+> (run from `/docker-entrypoint.d/`) rewrites them from the container's
+> environment on boot — so one image serves every environment and you configure
+> it via Docker `-e` / compose `environment:` (no rebuild). Either way these
+> values are visible in the browser bundle — treat `VITE_BEEVER_API_KEY` as a
+> low-privilege read-only key.
 
 ## Project Layout
 

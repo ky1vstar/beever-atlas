@@ -57,13 +57,15 @@ services:
   web:
     build:
       context: ./web
-      args:
-        # Single source of truth: root ``.env`` feeds these into Vite at
-        # build time. Add new ``VITE_*`` vars in two places — here AND
-        # ``web/Dockerfile`` ARG list — then they ship in the bundle.
-        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
-        VITE_BEEVER_API_KEY: ${VITE_BEEVER_API_KEY:-}
-        VITE_BEEVER_ADMIN_TOKEN: ${VITE_BEEVER_ADMIN_TOKEN:-}
+    # VITE_* values are injected at RUNTIME by web/env.sh (see web/Dockerfile),
+    # not baked at build time. The image is built once and configured per
+    # environment via these env vars — change a value and `docker compose up -d
+    # web` (no rebuild) picks it up. Add a new VITE_* here + in web/Dockerfile's
+    # ENV sentinel list. Single source of truth stays the root ``.env``.
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+      VITE_BEEVER_API_KEY: ${VITE_BEEVER_API_KEY:-}
+      VITE_BEEVER_ADMIN_TOKEN: ${VITE_BEEVER_ADMIN_TOKEN:-}
     # Issue #39 — web container now runs as nginx-unprivileged listening on
     # 8080 (CIS Docker Benchmark — non-root). Host port 3000 unchanged so
     # existing dev URLs (http://localhost:3000/) keep working.
