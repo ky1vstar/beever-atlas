@@ -1,15 +1,20 @@
-name: Release — publish Docker image to GHCR
+name: Release — publish Docker images to GHCR
 
-# Builds and pushes the official multi-arch image to
-# ghcr.io/beever-ai/beever-atlas on every version tag, keeping `:latest`
+# Builds and pushes the official multi-arch images (API, web, bot) under the
+# ``ghcr.io/<owner>`` namespace on every version tag, keeping `:latest`
 # pointed at the newest release automatically. This is the mechanism that keeps
-# the published image up to date — previously images were pushed by hand, which
+# the published images up to date — previously images were pushed by hand, which
 # let `:latest` drift behind the real release.
+#
+# The namespace is derived from the repository owner, so forks publish to their
+# own GHCR namespace with zero config.
 #
 # Trigger options:
 #   - push a `v*.*.*` tag (the normal release path) → publishes :<version> + :latest
-#   - run manually (workflow_dispatch) with a version → rebuilds that tag's source
+#   - run manually (workflow_dispatch) WITH a version → rebuilds that tag's source
 #     and republishes :<version> + :latest (use this to repair a drifted :latest)
+#   - run manually (workflow_dispatch) WITHOUT a version → builds the current ref
+#     and publishes :latest only
 
 on:
   push:
@@ -18,13 +23,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Existing release version to (re)publish, without the leading v (e.g. 0.3.0). Rebuilds that git tag and refreshes :latest."
-        required: true
-
-concurrency:
-  # Serialize releases; never cancel an in-flight publish.
-  group: release-docker
-  cancel-in-progress: false
+        description: "Optional release version to (re)publish, without the leading v (e.g. 0.3.0). When set, rebuilds that git tag and refreshes :latest. When empty, builds the current ref and publishes :latest only."
+        required: false
 
 permissions:
   contents: read
@@ -35,13 +35,34 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    concurrency:
+      # Serialize releases per image; never cancel an in-flight publish.
+      group: release-docker-${{ matrix.name }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: beever-atlas          # Python API / core service (root Dockerfile)
+            context: .
+            dockerfile: Dockerfile
+          - name: beever-atlas-web      # React + nginx frontend
+            context: ./web
+            dockerfile: ./web/Dockerfile
+          - name: beever-atlas-bot      # Chat bridge / bot
+            context: ./bot
+            dockerfile: ./bot/Dockerfile
     env:
-      IMAGE: ghcr.io/beever-ai/beever-atlas   # lowercase: GHCR paths are case-sensitive
+      # lowercase: GHCR paths are case-sensitive. Namespace derived from the
+      # repository owner so forks publish to their own namespace with no config.
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
     steps:
-      - name: Checkout (the tag's source, even on manual re-publish)
+      - name: Checkout (the tag's source on version re-publish, else current ref)
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', github.event.inputs.version) || github.ref }}
+          # Manual run WITH a version → that tag's source. Manual run WITHOUT a
+          # version, or a tag push → the triggering ref.
+          ref: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.version != '') && format('v{0}', github.event.inputs.version) || github.ref }}
 
       - name: Set up QEMU (arm64 emulation)
         uses: docker/setup-qemu-action@v3
@@ -66,10 +87,10 @@ jobs:
             latest=auto
           tags: |
             type=semver,pattern={{version}}
-            type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.version != '' }}
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_dispatch' }}
           labels: |
-            org.opencontainers.image.title=beever-atlas
+            org.opencontainers.image.title=${{ matrix.name }}
             org.opencontainers.image.description=Wiki-first RAG system with dual semantic + graph memory
             org.opencontainers.image.licenses=Apache-2.0
             org.opencontainers.image.vendor=Beever AI Limited
@@ -78,15 +99,18 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scope the cache per image so the three matrix builds don't clobber
+          # each other's layers.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
       - name: Attest build provenance (signed, pushed to registry)
         uses: actions/attest-build-provenance@v2
