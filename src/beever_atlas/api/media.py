@@ -27,6 +27,10 @@ ALLOWED_HOSTS = {
     "slack-files.com",
     "cdn.discordapp.com",
     "media.discordapp.net",
+    # Synthetic reference host for ``telegram-user`` (MTProto) media. Reserved
+    # by RFC 2606, so it never resolves; the bot bridge dereferences the handle
+    # through an authenticated MTProto download instead of an HTTP fetch.
+    "tg.invalid",
 }
 
 SLACK_HOSTS = {"files.slack.com", "slack-files.com"}

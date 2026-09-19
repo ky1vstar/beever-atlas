@@ -77,7 +77,9 @@ describe("useDeleteChannel", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0];
     expect(String(url)).toContain("/api/channels/ch-1");
-    expect(String(url)).toContain("confirm=general");
+    // Type-to-confirm is a UI-only guard now — the request carries no
+    // `confirm` param for the server to re-validate.
+    expect(String(url)).not.toContain("confirm=");
     expect(init?.method).toBe("DELETE");
   });
 
@@ -98,7 +100,8 @@ describe("useDeleteChannel", () => {
     });
 
     const [url] = fetchMock.mock.calls[0];
-    expect(String(url)).toContain("confirm=my%20channel%20%26%20stuff");
+    // A slash in the id must not escape the route path.
+    expect(String(url)).toContain("/api/channels/ch%2F2");
   });
 
   it("on 200 completed: calls release + dispatches connections-changed + success toast", async () => {

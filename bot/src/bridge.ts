@@ -15,6 +15,15 @@ import type { SlackAdapter } from "@chat-adapter/slack";
 import type { TeamsAdapter } from "@chat-adapter/teams";
 import type { Message as ChatSDKMessage } from "chat";
 import { cleanSlackMrkdwn } from "./slack-mrkdwn.js";
+import {
+  TelegramUserBridge,
+  TELEGRAM_USER_FILE_HOST,
+  parseTelegramUserFileUrl,
+} from "./telegram-user-bridge.js";
+import {
+  disconnectAllTelegramUserClients,
+  parseTelegramUserCredentials,
+} from "./telegram-user-client.js";
 import type { ChatManager } from "./chat-manager.js";
 export type { PlatformErrorShape } from "./bridge/platformError.js";
 export { classifyPlatformError } from "./bridge/platformError.js";
@@ -42,7 +51,10 @@ export interface NormalizedMessage {
   message_id: string;
   timestamp: string;
   thread_id: string | null;
-  attachments: Array<{ type: string; url?: string; name?: string }>;
+  // `mimetype` is optional for historical reasons but every bridge that has a
+  // content type populates it — the backend media processor routes on it when
+  // the filename carries no usable extension.
+  attachments: Array<{ type: string; url?: string; name?: string; mimetype?: string }>;
   reactions: Array<{ name: string; count: number }>;
   reply_count: number;
   is_bot: boolean;
@@ -53,6 +65,23 @@ export interface NormalizedMessage {
    *  (https://discord.com/channels/{guild_id}/{channel_id}/{message_id}).
    *  Omitted for Slack/Teams/Mattermost/Telegram. */
   guild_id?: string;
+  /** `telegram-user`-only: album id shared by the messages of one multi-media
+   *  post. Telegram allows exactly ONE media per message (`Api.Message.media`
+   *  is a single field, not an array), so an "album" is N separate messages
+   *  tied together by this id — the caption lives on one of them and the rest
+   *  carry only media.
+   *
+   *  The messages are deliberately NOT merged during ingestion: `message_id`
+   *  must keep matching the platform's own id, because the sync runner dedups
+   *  on it and `thread_id` on a reply points at a parent's `message_id`.
+   *  Merging would also be non-deterministic — an album can straddle a
+   *  pagination boundary, so which members are visible together depends on
+   *  where the 500-message page happens to end.
+   *
+   *  Carried through `raw_metadata` (the bridge adapter stores the whole JSON
+   *  payload there) so a reader can group album members at render time, when
+   *  every member is already persisted. Omitted for other platforms. */
+  grouped_id?: string;
 }
 
 export interface NormalizedChannel {
@@ -2566,6 +2595,14 @@ function newBridgeForPlatform(platform: string, adapter: unknown, connectionId: 
   if (platform === "discord") return new DiscordBridge(adapter);
   if (platform === "teams") return new TeamsBridge(adapter as TeamsAdapter, connectionId);
   if (platform === "telegram") return new TelegramBridge(adapter, connectionId);
+  if (platform === "telegram-user") {
+    // Ingest-only MTProto user session. Like Mattermost, the bridge needs the
+    // credentials rather than a Chat SDK adapter instance (there is none —
+    // chat-manager skips this platform when building the Chat adapter set).
+    const creds = parseTelegramUserCredentials(chatManager?.getAdapterConfig(connectionId), connectionId);
+    if (!creds) return null;
+    return new TelegramUserBridge(connectionId, creds);
+  }
   if (platform === "mattermost") {
     const config = chatManager?.getAdapterConfig(connectionId);
     const baseUrl = config?.baseUrl || config?.server_url || "";
@@ -2675,6 +2712,9 @@ function detectPlatformFromUrl(url: string): string | null {
   if (host === "cdn.discordapp.com" || host === "media.discordapp.net") return "discord";
   if (host === "graph.microsoft.com" || host.endsWith(".sharepoint.com")) return "teams";
   if (host === "api.telegram.org") return "telegram";
+  // Synthetic reference host for MTProto media — see TELEGRAM_USER_FILE_HOST.
+  // It never resolves in DNS; the bridge resolves the handle via downloadMedia.
+  if (host === TELEGRAM_USER_FILE_HOST) return "telegram-user";
   // Mattermost is self-hosted on a per-instance baseUrl; detect by API path.
   if (url.includes("/api/v4/files/")) return "mattermost";
   return null;
@@ -2930,6 +2970,22 @@ async function handleFileProxy(
     let bridge: PlatformBridge | null = null;
     if (connectionId && resolvedPlatform) {
       bridge = getBridge(chatManager, resolvedPlatform, connectionId);
+    }
+
+    // Layer A2: `telegram-user` reference URLs embed their own connection id,
+    // so the exact adapter is known without probing. Unlike Slack's team-id
+    // lookup this needs no `workspaceIdMap` entry — the id is in the path.
+    //
+    // Resolved via `getBridgeByConnectionId`, NOT `getBridge`: the latter needs
+    // a live Chat SDK adapter instance, which an ingest-only connection never
+    // has (chat-manager keeps it out of the Chat set), so it would 503 with
+    // NO_ADAPTER. The former falls back to `getConnectionInfo`, the same path
+    // Mattermost relies on.
+    if (!bridge && resolvedPlatform === "telegram-user") {
+      const ref = parseTelegramUserFileUrl(fileUrl);
+      if (ref) {
+        bridge = getBridgeByConnectionId(chatManager, ref.connectionId)?.bridge ?? null;
+      }
     }
 
     // Layer B: Extract workspace ID from URL and match to cached adapter identity
@@ -3320,6 +3376,11 @@ export function registerBridgeRoutes(
     clearBridgeCache();
     clearMattermostUserCache();
     clearUserProfileCache();
+    // `telegram-user` bridges own a long-lived MTProto socket each. Dropping
+    // the bridge without closing it would leak the connection for the process
+    // lifetime, so close them in lockstep with `bridgeCache`. Fire-and-forget:
+    // the rebuild listener is synchronous and a slow close must not block it.
+    void disconnectAllTelegramUserClients();
     const teamsPruned = pruneStaleTeamsConversations();
     const telegramPruned = pruneStaleTelegramChats();
     if (teamsPruned > 0 || telegramPruned > 0) {

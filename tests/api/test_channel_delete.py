@@ -2,15 +2,17 @@
 
 This is the DESTRUCTIVE full delete — distinct from
 ``DELETE /api/channels/{channel_id}/data`` (reset). These tests focus on the
-ENDPOINT'S responsibilities: authz-first ordering, type-to-confirm validation,
-404 resolution, and status → HTTP mapping. The store fan-out is unit-tested in
-Wave 2, so we monkeypatch ``purge_channel`` to a fake and assert routing —
-not the fan-out.
+ENDPOINT'S responsibilities: authz-first ordering, 404 resolution, and
+status → HTTP mapping. The store fan-out is unit-tested in Wave 2, so we
+monkeypatch ``purge_channel`` to a fake and assert routing — not the fan-out.
+
+Type-to-confirm is enforced by the UI dialog, not this endpoint: it is
+anti-accidental friction rather than an authz control, and server-side
+enforcement coupled the endpoint to whichever label the UI rendered.
 
 Acceptance criteria covered:
   * AC#6  authz / IDOR — ``assert_channel_delete_access`` enforced FIRST.
   * AC#7  honest partial-failure — service ``status="partial"`` → HTTP 207.
-  * AC#8  confirm mismatch — ``?confirm=wrong`` → 400, purge NOT called.
   * happy path — ``status="completed"`` → 200 with counts.
   * 404 — channel referenced nowhere → 404 (purge NOT called).
   * already_in_progress — CAS loser → 200 without assuming counts.
@@ -128,53 +130,34 @@ async def test_delete_completed_returns_200_with_counts(client, monkeypatch):
     spy.assert_awaited_once_with(_CHANNEL_ID, principal_id="user:test")
 
 
-async def test_delete_confirm_rejects_channel_id_when_name_exists(client, monkeypatch):
-    """Hardening: when a display name is stored, ``confirm`` must equal that
-    name. The raw channel_id is NO LONGER accepted as a second key (it was a
-    niche bypass that widened the accepted set). 400, purge NOT called."""
+async def test_delete_needs_no_confirm_param(client, monkeypatch):
+    """Type-to-confirm is a UI-only guard now, so the endpoint purges without
+    any ``confirm`` query param. Server-side enforcement compared against the
+    activity-log display name, which could differ from the label the dialog
+    rendered (the summary endpoint 404s until the first consolidation), so a
+    user typing exactly what they saw got a 400."""
     _allow_delete(monkeypatch)
-    _patch_display_name(monkeypatch)  # display name = "General"
+    _patch_display_name(monkeypatch)  # a display name IS stored
     _make_referenced(monkeypatch, referenced=True)
     spy = _patch_purge(monkeypatch, status="completed")
 
-    resp = await client.request(
-        "DELETE",
-        f"/api/channels/{_CHANNEL_ID}",
-        params={"confirm": _CHANNEL_ID},  # id, not the name → rejected
-    )
-    assert resp.status_code == 400, resp.text
-    spy.assert_not_called()
-
-
-async def test_delete_confirm_accepts_trimmed_display_name(client, monkeypatch):
-    """A stored display name with surrounding whitespace is accepted by its
-    trimmed form (the UI sends the visible, trimmed label)."""
-    _allow_delete(monkeypatch)
-    _patch_display_name(monkeypatch, name=f"  {_DISPLAY_NAME}  ")
-    _make_referenced(monkeypatch, referenced=True)
-    spy = _patch_purge(monkeypatch, status="completed")
-
-    resp = await client.request(
-        "DELETE",
-        f"/api/channels/{_CHANNEL_ID}",
-        params={"confirm": _DISPLAY_NAME},  # trimmed name
-    )
+    resp = await client.request("DELETE", f"/api/channels/{_CHANNEL_ID}")
     assert resp.status_code == 200, resp.text
-    spy.assert_awaited_once()
+    spy.assert_awaited_once_with(_CHANNEL_ID, principal_id="user:test")
 
 
-async def test_delete_confirm_accepts_channel_id_when_no_name(client, monkeypatch):
-    """When NO display name is stored, the raw channel_id is the fallback
-    confirm token (the UI labels the channel by its id in that case)."""
+async def test_delete_ignores_a_stray_confirm_param(client, monkeypatch):
+    """A stale client still sending ``?confirm=`` is not rejected — the value
+    is simply unused, so old callers keep working."""
     _allow_delete(monkeypatch)
-    _patch_display_name(monkeypatch, name=None)  # no display name
+    _patch_display_name(monkeypatch)
     _make_referenced(monkeypatch, referenced=True)
     spy = _patch_purge(monkeypatch, status="completed")
 
     resp = await client.request(
         "DELETE",
         f"/api/channels/{_CHANNEL_ID}",
-        params={"confirm": _CHANNEL_ID},
+        params={"confirm": "anything-at-all"},
     )
     assert resp.status_code == 200, resp.text
     spy.assert_awaited_once()
@@ -200,39 +183,6 @@ async def test_delete_partial_returns_207_with_errors(client, monkeypatch):
     body = resp.json()
     assert body["status"] == "partial"
     assert body["errors"] == {"weaviate": "boom"}
-
-
-# ---------------------------------------------------------------------------
-# AC#8 — confirm mismatch → 400, purge NOT called
-# ---------------------------------------------------------------------------
-
-
-async def test_delete_confirm_mismatch_returns_400_and_does_not_purge(client, monkeypatch):
-    _allow_delete(monkeypatch)
-    _patch_display_name(monkeypatch)
-    _make_referenced(monkeypatch, referenced=True)
-    spy = _patch_purge(monkeypatch, status="completed")
-
-    resp = await client.request(
-        "DELETE",
-        f"/api/channels/{_CHANNEL_ID}",
-        params={"confirm": "wrong"},
-    )
-    assert resp.status_code == 400, resp.text
-    # The store fan-out must never run on a confirm mismatch (no lock claimed).
-    spy.assert_not_called()
-
-
-async def test_delete_missing_confirm_returns_422(client, monkeypatch):
-    _allow_delete(monkeypatch)
-    _patch_display_name(monkeypatch)
-    _make_referenced(monkeypatch, referenced=True)
-    spy = _patch_purge(monkeypatch, status="completed")
-
-    # ``confirm`` is a required query param → FastAPI 422 before the handler.
-    resp = await client.request("DELETE", f"/api/channels/{_CHANNEL_ID}")
-    assert resp.status_code == 422, resp.text
-    spy.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -406,9 +356,9 @@ async def test_authz_single_tenant_user_allowed(client, monkeypatch):
     spy.assert_awaited_once()
 
 
-async def test_authz_enforced_before_confirm(client, monkeypatch):
-    """AC#6 ordering: even with a WRONG confirm, a denied principal gets 403
-    (authz runs before confirm validation), and the stores stay untouched."""
+async def test_authz_enforced_before_any_lookup(client, monkeypatch):
+    """AC#6 ordering: a denied principal gets 403 before any store is read, so
+    the destructive fan-out never runs and no channel metadata is resolved."""
     _force_single_tenant(monkeypatch, False)
     stores = channels_mod.get_stores()
     from datetime import UTC, datetime
@@ -436,15 +386,11 @@ async def test_authz_enforced_before_confirm(client, monkeypatch):
 
     app.dependency_overrides[require_user] = _override_principal("user:intruder")
     try:
-        resp = await client.request(
-            "DELETE",
-            f"/api/channels/{_CHANNEL_ID}",
-            params={"confirm": "wrong-on-purpose"},
-        )
+        resp = await client.request("DELETE", f"/api/channels/{_CHANNEL_ID}")
     finally:
         app.dependency_overrides.pop(require_user, None)
 
     assert resp.status_code == 403, resp.text
     spy.assert_not_called()
-    # Authz short-circuits before we even resolve the display name for confirm.
+    # Authz short-circuits before any channel metadata is read.
     dn.assert_not_called()

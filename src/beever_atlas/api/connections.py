@@ -103,6 +103,11 @@ def _credential_fingerprint(platform: str, credentials: dict[str, str]) -> str |
         # workspace identity.
         value = credentials.get("app_id") or credentials.get("appId")
         return value.strip().lower() if isinstance(value, str) and value.strip() else None
+    if platform == "telegram-user":
+        # An MTProto user session has no bot token; the StringSession itself
+        # identifies the logged-in account, so it anchors identity here.
+        value = credentials.get("session")
+        return value.strip() if isinstance(value, str) and value.strip() else None
     value = credentials.get("bot_token")
     return value if isinstance(value, str) and value else None
 
@@ -348,7 +353,15 @@ async def create_connection(
     stores = get_stores()
     platform = body.platform.lower()
 
-    if platform not in ("slack", "discord", "teams", "telegram", "mattermost", "file"):
+    if platform not in (
+        "slack",
+        "discord",
+        "teams",
+        "telegram",
+        "telegram-user",
+        "mattermost",
+        "file",
+    ):
         raise HTTPException(status_code=400, detail=f"Unsupported platform: {platform!r}")
 
     # "file" connections are created by POST /api/imports/commit with no

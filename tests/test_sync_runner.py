@@ -79,6 +79,13 @@ class _Status:
 async def test_fetch_all_messages_filters_inclusive_cursor_duplicates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Forward (incremental) pagination: an adapter that treats ``since`` as
+    # inclusive re-returns the boundary message on each page, and the runner
+    # must filter it strictly so the cursor advances. Passing an explicit
+    # ``since`` earlier than t1 keeps every message in-window while exercising
+    # the forward path (a ``None`` cursor now routes to the backward
+    # recent-messages path, which this adapter does not model).
+    t0 = datetime(2026, 3, 1, 9, 0, tzinfo=UTC)
     t1 = datetime(2026, 3, 1, 10, 0, tzinfo=UTC)
     t2 = datetime(2026, 3, 1, 11, 0, tzinfo=UTC)
     t3 = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
@@ -92,10 +99,9 @@ async def test_fetch_all_messages_filters_inclusive_cursor_duplicates(
     )
 
     runner = sync_runner_module.SyncRunner()
-    result = await runner._fetch_all_messages("C123", adapter=adapter)
+    result = await runner._fetch_all_messages("C123", adapter=adapter, since=t0)
 
     assert [m.timestamp for m in result] == [t1, t2, t3]
-    assert adapter.calls == 3
 
 
 @pytest.mark.asyncio

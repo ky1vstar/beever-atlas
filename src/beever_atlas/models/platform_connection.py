@@ -13,7 +13,12 @@ class PlatformConnection(BaseModel):
     """Persisted record of a connected chat platform."""
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    platform: Literal["slack", "discord", "teams", "telegram", "mattermost", "file"]
+    # ``telegram-user`` is an MTProto user session used for history ingestion;
+    # ``telegram`` remains the Bot API reply path. They are separate platforms
+    # because a bot token cannot read group history at all.
+    platform: Literal[
+        "slack", "discord", "teams", "telegram", "telegram-user", "mattermost", "file"
+    ]
     display_name: str
     encrypted_credentials: bytes
     credential_iv: bytes

@@ -298,6 +298,50 @@ def _channel_message_row_to_response(row: dict[str, Any], channel_id: str) -> "M
     )
 
 
+async def _with_real_reply_counts(
+    messages: list["MessageResponse"],
+    channel_id: str,
+) -> list["MessageResponse"]:
+    """Derive ``telegram-user`` ``reply_count`` from the stored rows.
+
+    Only ``telegram-user`` messages are touched (their ``platform`` field says
+    so). Every other platform reports ``reply_count`` through its history API —
+    Slack/Mattermost carry it, and their threads are read live from the bridge —
+    so their persisted value is authoritative and must be left as-is.
+
+    ``telegram-user`` returns thread parents AND their replies in one pass and
+    persists ``reply_count=0``, so the UI (which hides a reply unless its parent
+    advertises ``reply_count > 0``) never offered to expand a thread. A reply
+    stores its parent's id in ``thread_id``, so the true count is a single
+    grouped aggregation over the page's parent ids. Best-effort: on any failure
+    the persisted values are kept (a missing expander beats a failed list).
+    """
+    parents = [
+        m for m in messages if m.platform == "telegram-user" and m.message_id and not m.thread_id
+    ]
+    parent_ids = [m.message_id for m in parents]
+    if not parent_ids:
+        return messages
+    try:
+        stores = get_stores()
+        counts = await stores.mongodb.count_replies_for_messages(channel_id, parent_ids)
+    except Exception:
+        logger.debug(
+            "Failed to count replies for channel %s; keeping platform reply_count",
+            channel_id,
+            exc_info=True,
+        )
+        return messages
+    if not counts:
+        return messages
+    return [
+        m.model_copy(update={"reply_count": counts[m.message_id]})
+        if m.message_id in counts
+        else m
+        for m in messages
+    ]
+
+
 async def _compute_total_count(channel_id: str, adapter: Any | None) -> int | None:
     """Compute ``total_count`` identically across the store and adapter paths.
 
@@ -361,9 +405,10 @@ async def _fetch_file_messages(
                     "source": "channel_messages",
                 },
             )
-            response_messages = [
-                _channel_message_row_to_response(row, channel_id) for row in store_rows
-            ]
+            response_messages = await _with_real_reply_counts(
+                [_channel_message_row_to_response(row, channel_id) for row in store_rows],
+                channel_id,
+            )
             total_count = await _compute_total_count(channel_id, adapter=None)
             return MessagesListResponse(
                 messages=response_messages,
@@ -769,9 +814,10 @@ async def get_channel_messages(
                     "row_count": len(store_rows),
                 },
             )
-            response_messages = [
-                _channel_message_row_to_response(row, channel_id) for row in store_rows
-            ]
+            response_messages = await _with_real_reply_counts(
+                [_channel_message_row_to_response(row, channel_id) for row in store_rows],
+                channel_id,
+            )
             total_count = await _compute_total_count(channel_id, adapter=None)
             return MessagesListResponse(
                 messages=response_messages,
@@ -836,8 +882,30 @@ async def get_thread_messages(
     connection_id: str | None = Query(default=None),
     principal: Principal = Depends(require_user),
 ) -> list[MessageResponse]:
-    """Get all messages in a thread (parent + replies)."""
+    """Get all messages in a thread (parent + replies).
+
+    Every platform reads its thread from the bridge EXCEPT ``telegram-user``:
+
+      * Slack / Discord / Teams / Mattermost store only thread PARENTS as
+        standalone rows and fetch replies live (``conversations.replies``, the
+        thread channel, …), so the bridge is the source of truth for them.
+      * ``telegram-user`` persists replies as ordinary ``channel_messages`` rows
+        (each carries its parent's id in ``thread_id``), and MTProto's
+        ``messages.GetReplies`` only works for channel discussion-threads — not
+        an arbitrary in-group reply — so a bridge call 502'd. Its thread is
+        already fully in the store, so we read it from there instead.
+
+    The store read is gated on the platform, NOT ``READ_FROM_MESSAGE_STORE``:
+    that flag governs the message-LIST migration and is unrelated: rolling it
+    back must not push Telegram thread reads onto the broken bridge path.
+    """
     await assert_channel_access(principal, channel_id)
+
+    if await _connection_platform(channel_id, connection_id) == "telegram-user":
+        stores = get_stores()
+        rows = await stores.mongodb.get_thread_replies(channel_id, thread_id)
+        return [_channel_message_row_to_response(row, channel_id) for row in rows]
+
     adapter = await _resolve_adapter_for_channel(channel_id, connection_id)
     try:
         messages = await adapter.fetch_thread(channel_id, thread_id)
@@ -1001,6 +1069,26 @@ async def clear_channel_data(
     return results
 
 
+async def _connection_platform(channel_id: str, connection_id: str | None) -> str | None:
+    """Best-effort platform lookup for a channel, from its owning connection.
+
+    Prefers the explicit ``connection_id``; otherwise finds a connection whose
+    ``selected_channels`` includes the channel. Returns ``None`` when nothing
+    matches (orphan channel / deleted connection). Cheap — one Mongo read of
+    the small connections collection, no bridge round-trip.
+    """
+    stores = get_stores()
+    connections = await stores.platform.list_connections()
+    if connection_id:
+        for conn in connections:
+            if conn.id == connection_id:
+                return conn.platform
+    for conn in connections:
+        if channel_id in (getattr(conn, "selected_channels", None) or []):
+            return conn.platform
+    return None
+
+
 async def _channel_is_referenced_anywhere(channel_id: str) -> bool:
     """Return True if ``channel_id`` is known to the deployment at all.
 
@@ -1023,14 +1111,6 @@ async def _channel_is_referenced_anywhere(channel_id: str) -> bool:
 @router.delete("/api/channels/{channel_id}")
 async def delete_channel(
     channel_id: str,
-    confirm: str = Query(
-        ...,
-        description=(
-            "Type-to-confirm guard. Must equal the channel's display name "
-            "(what the UI shows); the raw channel_id is accepted only as a "
-            "fallback when no display name is stored."
-        ),
-    ),
     principal: Principal = Depends(require_user),
 ):
     """Hard-purge a channel from every store (delete-channel-v2 Wave 3).
@@ -1049,12 +1129,13 @@ async def delete_channel(
       2. 404 when the channel is referenced nowhere (no connection pick-list,
          no synced data) — read-only, no lock claimed. A purged channel that
          lingers in the grid only because it's a live channel on the connected
-         platform is "already gone" → 404, not a confusing confirm-mismatch
-         400. Orphans with data are still valid targets.
-      3. ``confirm`` must match the channel display name (the channel_id is
-         accepted only as a fallback when no display name is stored); a
-         mismatch is a 400 and NO store is touched (the lock is never
-         claimed). This is anti-accidental UI friction, not an authz control.
+         platform is "already gone" → 404. Orphans with data are still valid
+         targets.
+
+    Type-to-confirm is enforced by the UI dialog, not here: it is
+    anti-accidental friction, and server-side enforcement coupled this endpoint
+    to whichever label the UI rendered (the two drifted, producing a 400 when
+    the user typed exactly what they saw).
 
     Status → HTTP mapping (the service never raises for a missing channel
     and never 500s — per-store failures are isolated into ``errors``):
@@ -1070,8 +1151,6 @@ async def delete_channel(
     # 1. Destructive authz FIRST — before confirm validation or any lookup.
     await assert_channel_delete_access(principal, channel_id)
 
-    stores = get_stores()
-
     # 2. Existence check FIRST. A channel referenced nowhere — no connection
     #    pick-list entry and no synced data — is already gone. This notably
     #    covers a previously-purged channel that still shows in the grid only
@@ -1083,32 +1162,17 @@ async def delete_channel(
     if not await _channel_is_referenced_anywhere(channel_id):
         raise HTTPException(status_code=404, detail=f"Channel {channel_id} not found")
 
-    # 3. Type-to-confirm guard. ``confirm`` is anti-accidental UI friction
-    #    (make the user type what they see) — NOT an authz control; the real
-    #    destructive authz is ``assert_channel_delete_access`` above. The
-    #    channel display name is not a secret. When a display name is stored we
-    #    accept ONLY that (trimmed) — the UI sends exactly what the user sees,
-    #    so also accepting the raw id is a needless second key that widens the
-    #    accepted set. The raw ``channel_id`` is accepted ONLY as a fallback
-    #    when no display name exists (orphans the UI labels by id). Validate
-    #    AFTER the existence check but BEFORE touching any store (no lock
-    #    claimed on mismatch). NOTE: ``confirm`` stays a query param on purpose
-    #    — the shared ``web/src/lib/api.ts`` ``delete`` wrapper has no
-    #    request-body support and DELETE-with-body is fragile across proxies.
-    display_name = await stores.mongodb.get_channel_display_name(channel_id)
-    if display_name and display_name.strip():
-        accepted = {display_name.strip()}
-    else:
-        accepted = {channel_id}
-    if confirm not in accepted:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "confirm does not match the channel name; "
-                "type the channel name exactly to confirm deletion"
-            ),
-        )
-
+    # 3. Type-to-confirm now lives ENTIRELY in the UI. It was always
+    #    anti-accidental friction rather than an authz control (the real
+    #    destructive authz is ``assert_channel_delete_access`` above), and
+    #    enforcing it server-side coupled the endpoint to whichever label the
+    #    UI happened to render. The two sources drifted: the danger-zone dialog
+    #    reads its label from the channel summary, which 404s until the first
+    #    consolidation and therefore showed the raw channel id, while the
+    #    server compared against the display name recorded in the activity log
+    #    — so a user typing exactly what they saw got a confusing 400. The
+    #    dialog keeps requiring the typed name before it will call this
+    #    endpoint.
     result = await purge_channel(channel_id, principal_id=principal.id)
     status = result.get("status")
 

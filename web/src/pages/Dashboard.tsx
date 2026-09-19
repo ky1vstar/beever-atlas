@@ -12,7 +12,7 @@ import { FileImportWizard } from "@/components/settings/FileImportWizard";
 import { useUserProfile } from "@/hooks/useUserProfile";
 import type { PlatformConnection } from "@/lib/types";
 
-type Platform = "slack" | "discord" | "teams" | "telegram" | "mattermost";
+type Platform = "slack" | "discord" | "teams" | "telegram" | "telegram-user" | "mattermost";
 
 interface Channel {
   channel_id: string;

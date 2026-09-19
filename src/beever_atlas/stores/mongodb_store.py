@@ -174,6 +174,23 @@ class MongoDBStore:
             [("channel_id", 1), ("timestamp", -1)],
             name="channel_messages_channel_timestamp",
         )
+        # 2b) Reply lookup for ``count_replies_for_messages`` — the read path
+        # derives ``reply_count`` by grouping replies on their parent's id.
+        # Without it the ``{channel_id, thread_id: {$in: […]}}`` match falls back
+        # to the ``(channel_id, timestamp)`` index and examines every row in the
+        # channel (measured: 20 220 docs examined to return 31), growing
+        # linearly with history.
+        #
+        # NOT partial: a ``partialFilterExpression`` on ``thread_id`` is only
+        # usable when the query itself proves the row is in the subset, and an
+        # ``$in`` on parent ids does not — the planner silently ignored the
+        # partial variant and kept scanning. Top-level rows store ``thread_id:
+        # null``, so they occupy one index key each; that is the cost of making
+        # the lookup a seek.
+        await self._channel_messages.create_index(
+            [("channel_id", 1), ("thread_id", 1)],
+            name="channel_messages_channel_thread",
+        )
         # 3) Sparse index for the ExtractionWorker queue scan.
         # ``extraction_status`` is always set on insert, but the sparse condition
         # keeps the index cheap by excluding ``done`` rows from the workload.
@@ -1810,6 +1827,60 @@ class MongoDBStore:
             doc.pop("_id", None)
             rows.append(doc)
         return rows
+
+    async def get_thread_replies(
+        self,
+        channel_id: str,
+        thread_id: str,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return the stored replies whose parent is ``thread_id`` (oldest-first).
+
+        For platforms that persist replies as ordinary rows carrying the
+        parent's id in ``thread_id`` (Discord, ``telegram-user``, file imports),
+        the whole thread is already in the Message Store — the UI's thread
+        expander does not need a live platform round-trip. Uses the
+        ``(channel_id, thread_id)`` index.
+        """
+        query = {"channel_id": channel_id, "thread_id": thread_id}
+        cursor = self._channel_messages.find(query).sort("timestamp", 1).limit(limit)
+        rows: list[dict[str, Any]] = []
+        async for doc in cursor:
+            doc.pop("_id", None)
+            rows.append(doc)
+        return rows
+
+    async def count_replies_for_messages(
+        self,
+        channel_id: str,
+        message_ids: list[str],
+    ) -> dict[str, int]:
+        """Return ``{parent_message_id: reply_count}`` for the given messages.
+
+        ``reply_count`` is a platform-reported field, so it is only populated
+        for platforms whose history API includes it (Slack, Mattermost). Slack
+        needs it because its history call returns thread parents only and the
+        replies are fetched separately; platforms that return parents AND
+        replies in one pass — Discord, and ``telegram-user`` — persist 0 and the
+        UI would never offer to expand a thread.
+
+        Counting from the stored rows fixes that without a schema change: a
+        reply carries its parent's id in ``thread_id``, so one grouped
+        aggregation over the page's ids yields the real counts. Only ids present
+        in the result have replies; callers should treat a missing key as 0.
+        """
+        if not message_ids:
+            return {}
+        pipeline: list[dict[str, Any]] = [
+            {"$match": {"channel_id": channel_id, "thread_id": {"$in": message_ids}}},
+            {"$group": {"_id": "$thread_id", "n": {"$sum": 1}}},
+        ]
+        counts: dict[str, int] = {}
+        async for row in self._channel_messages.aggregate(pipeline):
+            parent_id = row.get("_id")
+            if isinstance(parent_id, str) and parent_id:
+                counts[parent_id] = int(row.get("n", 0))
+        return counts
 
     async def count_channel_messages_by_status(self, channel_id: str) -> dict[str, int]:
         """Aggregate counts by ``extraction_status`` for one channel.

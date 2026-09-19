@@ -44,5 +44,6 @@ The `deploy/` subdirectory has its own README.
 |---|---|
 | `test_platform_bridge.py` | Dry-run test of multi-platform bridge endpoints — verifies HTTP status codes and response shapes for channels, messages, and file proxy. |
 | `check_mattermost_channels.py` | Lists all channels a Mattermost bot can see along with message counts. |
+| `telegram_login.py` | Interactive MTProto login (phone → code → 2FA) that prints the StringSession for a `telegram-user` connection. Requires `pip install telethon`. |
 | `dry_run_policy.py` | Dry-run for the configurable sync-policy system (policy resolution cascade, preset definitions, MongoDB integration). |
 | `dry_run_ui_layout.py` | Validates the UI layout redesign by checking sidebar nav items, routes, and component contracts. |

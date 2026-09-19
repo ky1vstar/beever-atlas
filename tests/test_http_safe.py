@@ -118,3 +118,43 @@ async def test_safe_client_disables_redirects(monkeypatch):
     assert captured["verify"] is True
     assert captured["headers"].get("Host") == "dns.google"
     assert "8.8.8.8" in captured["url"]
+
+
+# ── Opaque reference handles (telegram-user MTProto media) ──────────────────
+#
+# `tg.invalid` is an allow-listed handle host, not a fetchable origin: RFC 2606
+# reserves `.invalid` so it never resolves. `validate_proxy_url` must therefore
+# skip the DNS/private-IP step for it (otherwise every Telegram attachment is
+# dropped) while still enforcing the allowlist.
+
+
+def test_validate_proxy_url_accepts_opaque_handle_without_dns(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError("DNS must not be resolved for an opaque handle host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+    encoded = http_safe.validate_proxy_url(
+        "https://tg.invalid/conn-1/-1001659373068_46074/168494"
+    )
+    # The caller must use the percent-encoded form when building the bridge URL.
+    assert "tg.invalid" in encoded
+    assert "%2F" in encoded
+
+
+def test_validate_proxy_url_rejects_other_invalid_hosts(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo("8.8.8.8"))
+    # Only the registered handle host is exempt — a lookalike is not.
+    with pytest.raises(PermissionError):
+        http_safe.validate_proxy_url("https://evil.invalid/a/b/c")
+    with pytest.raises(PermissionError):
+        http_safe.validate_proxy_url("https://tg.invalid.evil.com/a/b/c")
+
+
+def test_validate_proxy_url_handle_respects_allowlist_override():
+    # An operator-supplied allowlist that omits the handle host must still
+    # reject it, so the exemption can never widen the allowlist.
+    with pytest.raises(PermissionError):
+        http_safe.validate_proxy_url(
+            "https://tg.invalid/conn-1/-100123/7",
+            allowlist=["files.slack.com"],
+        )

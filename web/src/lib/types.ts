@@ -476,7 +476,10 @@ export interface MemoryTier1 {
 
 export interface PlatformConnection {
   id: string;
-  platform: "slack" | "discord" | "teams" | "telegram" | "mattermost" | "file";
+  // `telegram-user` is an MTProto user session used to ingest group history;
+  // `telegram` remains the Bot API reply path. A bot token cannot read history,
+  // hence the two separate platforms.
+  platform: "slack" | "discord" | "teams" | "telegram" | "telegram-user" | "mattermost" | "file";
   display_name: string;
   status: "connected" | "disconnected" | "error";
   error_message: string | null;
@@ -487,7 +490,7 @@ export interface PlatformConnection {
 }
 
 export interface PlatformCredentials {
-  platform: "slack" | "discord" | "teams" | "telegram" | "mattermost";
+  platform: "slack" | "discord" | "teams" | "telegram" | "telegram-user" | "mattermost";
   credentials: Record<string, string>;
   display_name?: string;
 }

@@ -184,6 +184,14 @@ export class ChatManager {
       const adapterInstances: Record<string, unknown> = {};
 
       for (const [key, entry] of this.adapters.entries()) {
+        // `telegram-user` is an MTProto USER session (teleproto), not a Chat
+        // SDK adapter, and it is ingest-only — it registers no handlers and
+        // never replies. Its credentials still live in `this.adapters` so the
+        // bridge factory can reach them via `getAdapterConfig`, but it must
+        // stay out of the Chat instance: `new Chat({adapters})` expects Chat
+        // SDK adapters only.
+        if (entry.platform === "telegram-user") continue;
+
         // Slack: botToken is always required, plus EITHER a signingSecret
         // (Events API / webhook mode — needs a public inbound URL) OR an
         // appToken (Socket Mode — outbound WebSocket, no public URL needed).
@@ -288,7 +296,15 @@ export class ChatManager {
       }
 
       if (Object.keys(adapterInstances).length === 0) {
-        console.warn("ChatManager: no valid adapters could be created");
+        // Expected when every registered connection is ingest-only (e.g. a
+        // lone `telegram-user`): there is nothing for the Chat SDK to drive,
+        // but the bridge still serves history via `getConnectionInfo`.
+        const ingestOnly = [...this.adapters.values()].every((e) => e.platform === "telegram-user");
+        if (ingestOnly && this.adapters.size > 0) {
+          console.log("ChatManager: only ingest-only connections registered, no Chat instance needed");
+        } else {
+          console.warn("ChatManager: no valid adapters could be created");
+        }
         return;
       }
 

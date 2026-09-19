@@ -54,6 +54,11 @@ PLATFORM_HOST_ALLOWLIST: frozenset[str] = frozenset(
         "api.telegram.org",
         "files.mattermost.com",
         "graph.microsoft.com",
+        # Synthetic reference host for ``telegram-user`` (MTProto) media.
+        # RFC 2606 reserves ``.invalid`` so it never resolves — the URL is an
+        # opaque handle that only the bot bridge can dereference (via
+        # ``downloadMedia``), never a fetchable origin.
+        "tg.invalid",
         "suffix:.sharepoint.com",
         "suffix:.slack-edge.com",
     }
@@ -149,6 +154,27 @@ def _active_allowlist(
 def _is_private(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)
     return any(addr in net for net in _PRIVATE_NETS)
+
+
+# Allow-listed hosts that are reference handles rather than fetchable origins.
+# They are dereferenced by the bot bridge through a platform API (e.g. an
+# MTProto ``downloadMedia`` call for ``telegram-user``), never by an HTTP
+# request from this process, so DNS/private-IP validation does not apply.
+_OPAQUE_HANDLE_HOSTS: frozenset[str] = frozenset({"tg.invalid"})
+
+
+def _is_opaque_handle_url(url: str, allowlist: Iterable[str]) -> bool:
+    """True when ``url``'s host is an allow-listed opaque reference handle."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if host not in _OPAQUE_HANDLE_HOSTS:
+        return False
+    # Defence in depth: honour the active allowlist so an operator who
+    # overrides ``FILE_PROXY_HOST_ALLOWLIST`` without the handle host still
+    # gets it rejected.
+    return any(_host_matches(host, entry) for entry in allowlist)
 
 
 def resolve_and_validate(url: str, allowlist: Iterable[str] | None = None) -> tuple[str, str]:
@@ -248,6 +274,14 @@ def validate_proxy_url(url: str, allowlist: Iterable[str] | None = None) -> str:
     returned percent-encoded string, never the raw input.
     """
     active = _active_allowlist(allowlist)
+    # Opaque-handle hosts carry no fetchable origin, so the DNS + private-IP
+    # step below cannot apply to them: ``.invalid`` is reserved by RFC 2606 and
+    # never resolves, which would fail the lookup and drop the attachment. The
+    # URL is only ever handed to the bot bridge, which dereferences it through
+    # an authenticated platform API instead of an HTTP request — so there is no
+    # egress to guard here. The allowlist check still runs.
+    if _is_opaque_handle_url(url, active):
+        return quote(url, safe="")
     # ``resolve_and_validate`` does DNS + IP-class rejection; our allowlist
     # handling here is layered on top so suffix-match entries work.
     resolve_and_validate(url, active)

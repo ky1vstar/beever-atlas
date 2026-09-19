@@ -61,6 +61,14 @@ function membershipHint(platform: string | undefined): ReactNode {
           then refresh.
         </>
       );
+    case "telegram-user":
+      return (
+        <>
+          Every group the account belongs to is listed. Groups with Topics
+          enabled appear as one entry per topic; broadcast channels and direct
+          messages are not shown.
+        </>
+      );
     default:
       return <>Only channels where the bot is a member are shown.</>;
   }

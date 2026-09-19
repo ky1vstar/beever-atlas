@@ -16,6 +16,7 @@ const PLATFORM_LABELS: Record<Platform, string> = {
   discord: "Discord",
   teams: "Microsoft Teams",
   telegram: "Telegram",
+  "telegram-user": "Telegram (user account)",
   mattermost: "Mattermost",
 };
 

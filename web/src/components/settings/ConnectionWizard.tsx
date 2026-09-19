@@ -7,7 +7,7 @@ import { useCreateConnection } from "@/hooks/useConnections";
 import { useConnectionChannels, useUpdateChannels } from "@/hooks/useConnections";
 import type { PlatformConnection } from "@/lib/types";
 
-export type Platform = "slack" | "discord" | "teams" | "telegram" | "mattermost";
+export type Platform = "slack" | "discord" | "teams" | "telegram" | "telegram-user" | "mattermost";
 
 interface ConnectionWizardProps {
   platform: Platform;
@@ -87,6 +87,22 @@ const TELEGRAM_INSTRUCTIONS = [
   { text: "Copy the bot token provided by BotFather (e.g. 123456:ABC-DEF...)" },
   { text: "Optionally generate a webhook secret token for request verification" },
   { text: "Add the bot to your group chat and grant it admin permissions to read messages" },
+];
+
+const TELEGRAM_USER_INSTRUCTIONS = [
+  { text: "Create an app at", link: "https://my.telegram.org/apps", linkText: "my.telegram.org/apps" },
+  { text: "Copy the App api_id and App api_hash shown there" },
+  {
+    text: "Run the login script on any machine with Python and paste the session string it prints:",
+    details: [
+      "pip install telethon",
+      "python scripts/telegram_login.py",
+    ],
+  },
+  {
+    text: "The script asks for your phone number, the login code Telegram sends, and your 2FA password if the account has one. Those stay on your machine — only the resulting session string is stored (encrypted).",
+  },
+  { text: "Make sure the account is a member of every group you want to ingest" },
 ];
 
 const MATTERMOST_INSTRUCTIONS = [
@@ -185,6 +201,24 @@ export const CREDENTIAL_FIELDS: Record<Platform, CredentialField[]> = {
     { key: "bot_token", label: "Bot Token", placeholder: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11", type: "password" },
     { key: "secret_token", label: "Webhook Secret Token (optional)", placeholder: "Optional verification secret for webhook requests", optional: true },
   ],
+  "telegram-user": [
+    {
+      key: "api_id",
+      label: "API id",
+      placeholder: "1234567",
+      hint: "From my.telegram.org/apps — a number, not the bot token.",
+      validate: (value) =>
+        /^\d+$/.test(value.trim()) ? null : "API id must be a number (see my.telegram.org/apps)",
+    },
+    { key: "api_hash", label: "API hash", placeholder: "0123456789abcdef0123456789abcdef", type: "password" },
+    {
+      key: "session",
+      label: "Session string",
+      placeholder: "Output of scripts/telegram_login.py",
+      type: "password",
+      hint: "Grants full access to the account — it is encrypted at rest. Re-run the login script if the session is ever revoked.",
+    },
+  ],
   mattermost: [
     { key: "base_url", label: "Server URL", placeholder: "https://your-mattermost.com" },
     { key: "bot_token", label: "Bot Token", placeholder: "Your bot access token", type: "password" },
@@ -208,6 +242,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
     discord: DISCORD_INSTRUCTIONS,
     teams: TEAMS_INSTRUCTIONS,
     telegram: TELEGRAM_INSTRUCTIONS,
+    "telegram-user": TELEGRAM_USER_INSTRUCTIONS,
     mattermost: MATTERMOST_INSTRUCTIONS,
   };
   const instructions = INSTRUCTIONS_MAP[platform];
@@ -283,7 +318,7 @@ export function ConnectionWizard({ platform, onClose, onComplete }: ConnectionWi
         <div className="shrink-0 px-6 py-4 border-b border-border space-y-3">
           <div className="flex items-center justify-between">
             <h2 className="text-base font-semibold text-foreground">
-              Connect {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram", mattermost: "Mattermost" }[platform]}
+              Connect {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram", "telegram-user": "Telegram (user account)", mattermost: "Mattermost" }[platform]}
             </h2>
             <button
               type="button"
@@ -571,7 +606,7 @@ function StepInstructions({
     <div className="space-y-5">
       <div>
         <h3 className="text-sm font-semibold text-foreground mb-1">
-          Set up your {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram", mattermost: "Mattermost" }[platform]} app
+          Set up your {{ slack: "Slack", discord: "Discord", teams: "Microsoft Teams", telegram: "Telegram", "telegram-user": "Telegram (user account)", mattermost: "Mattermost" }[platform]} app
         </h3>
         <p className="text-xs text-muted-foreground">Follow these steps before entering your credentials.</p>
       </div>
@@ -618,7 +653,7 @@ function StepInstructions({
           type="text"
           value={displayName}
           onChange={(e) => onDisplayNameChange(e.target.value)}
-          placeholder={`e.g. ${{ slack: "Engineering Workspace", discord: "Community Server", teams: "Corp Tenant", telegram: "Alerts Bot", mattermost: "Team Chat" }[platform]}`}
+          placeholder={`e.g. ${{ slack: "Engineering Workspace", discord: "Community Server", teams: "Corp Tenant", telegram: "Alerts Bot", "telegram-user": "Community Groups", mattermost: "Team Chat" }[platform]}`}
           className="w-full h-9 px-3 rounded-lg border border-border bg-background text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20"
         />
       </div>

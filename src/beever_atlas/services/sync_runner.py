@@ -525,6 +525,17 @@ class SyncRunner:
         seen_ids: set[str] = set()
         cursor = _coerce_since_timestamp(since)
 
+        # Full sync (no ``since``) walks BACKWARD from the newest message via the
+        # ``before`` cursor, so the ``msg_limit`` budget is spent on the most
+        # recent history. Forward pagination (below) only works with a starting
+        # point: without ``since`` its cursor jumps to the newest timestamp on
+        # page 1 and the next page — "newer than newest" — is empty, capping a
+        # full sync at a single page. The ``before``/``order`` contract is
+        # already honoured by every adapter (Slack ``latest``, Discord/Telegram
+        # message id, Mattermost post id), so this is platform-agnostic.
+        if cursor is None:
+            return await self._fetch_recent_messages(channel_id, adapter, msg_limit)
+
         while len(all_messages) < msg_limit:
             page_num = (len(all_messages) // 500) + 1
             # Use order=asc so that `since` (Slack's `oldest`) cursor moves
@@ -592,6 +603,94 @@ class SyncRunner:
             cursor = latest_ts
 
         return all_messages
+
+    async def _fetch_recent_messages(
+        self,
+        channel_id: str,
+        adapter: Any,
+        msg_limit: int,
+    ) -> list[Any]:
+        """Fetch the most recent ``msg_limit`` messages, paginating BACKWARD.
+
+        Used for a full sync (no ``since`` cursor). Each page is fetched
+        newest-first (``order="desc"``) and the ``before`` cursor is set to the
+        oldest message id of the previous page, so successive pages reach
+        further back in history. The accumulated list is returned oldest-first
+        to match the forward path's contract (the batch processor and the
+        ``last_sync_ts`` computation both expect ascending order).
+
+        ``before`` is the message id of a boundary message (Slack ``latest`` ts,
+        Discord/Telegram/Mattermost message id) — the same value each adapter
+        already accepts, so this stays platform-agnostic.
+        """
+        collected: list[Any] = []
+        seen_ids: set[str] = set()
+        before: str | None = None
+        page_num = 0
+
+        while len(collected) < msg_limit:
+            page_num += 1
+            batch = await adapter.fetch_history(
+                channel_id,
+                since=None,
+                limit=500,
+                before=before,
+                order="desc",  # newest-first so `before` walks backward
+            )
+            if not batch:
+                logger.info(
+                    "SyncRunner: recent fetch page=%d channel=%s empty; stopping.",
+                    page_num,
+                    channel_id,
+                )
+                break
+
+            # Deduplicate by message_id (a boundary message can reappear when an
+            # adapter treats `before` as inclusive).
+            deduped: list[Any] = []
+            for m in batch:
+                mid = getattr(m, "message_id", "") or getattr(m, "ts", "")
+                if mid and mid in seen_ids:
+                    continue
+                if mid:
+                    seen_ids.add(mid)
+                deduped.append(m)
+            if not deduped:
+                logger.info(
+                    "SyncRunner: recent fetch page=%d channel=%s all duplicates; stopping.",
+                    page_num,
+                    channel_id,
+                )
+                break
+
+            # The page is newest-first; its LAST element is the oldest, which
+            # becomes the next page's `before` cursor.
+            next_before = getattr(deduped[-1], "message_id", "") or getattr(deduped[-1], "ts", "")
+            collected.extend(deduped)
+            logger.info(
+                "SyncRunner: recent fetch page=%d channel=%s got=%d total=%d before=%s",
+                page_num,
+                channel_id,
+                len(deduped),
+                len(collected),
+                next_before,
+            )
+
+            if len(batch) < 500:
+                break  # last page — no older history
+            if not next_before or next_before == before:
+                logger.warning(
+                    "SyncRunner: recent-fetch cursor did not advance for channel %s; stopping.",
+                    channel_id,
+                )
+                break
+            before = next_before
+
+        # Trim to the budget (the newest ``msg_limit`` messages) then flip to
+        # oldest-first for the downstream contract.
+        collected = collected[:msg_limit]
+        collected.reverse()
+        return collected
 
     async def _fetch_thread_replies(
         self,

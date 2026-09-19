@@ -22,7 +22,7 @@ export interface UseDeleteChannelReturn {
 }
 
 /**
- * Hook for hard-purging a channel via DELETE /api/channels/{id}?confirm=<name>.
+ * Hook for hard-purging a channel via DELETE /api/channels/{id}.
  *
  * 207 handling: Response.ok is true for all 2xx including 207, so api.delete
  * returns the body normally for 207. We branch on result.status === "partial"
@@ -43,7 +43,7 @@ export function useDeleteChannel(): UseDeleteChannelReturn {
       setLoading(true);
       setError(null);
 
-      const url = `/api/channels/${encodeURIComponent(channelId)}?confirm=${encodeURIComponent(channelName)}`;
+      const url = `/api/channels/${encodeURIComponent(channelId)}`;
 
       try {
         const result = await api.delete<DeleteChannelResult>(url);

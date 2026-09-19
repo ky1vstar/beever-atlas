@@ -9,6 +9,7 @@ import {
   Cpu,
   Layers,
   KeyRound,
+  Send,
 } from "lucide-react";
 import { useConnections, useDeleteConnection } from "@/hooks/useConnections";
 import { PlatformCard } from "@/components/settings/PlatformCard";
@@ -19,7 +20,7 @@ import { EditCredentialsDialog } from "@/components/settings/EditCredentialsDial
 import { ConfirmRemoveDialog } from "@/components/settings/ConfirmRemoveDialog";
 import type { PlatformConnection } from "@/lib/types";
 
-type Platform = "slack" | "discord" | "teams" | "telegram" | "mattermost";
+type Platform = "slack" | "discord" | "teams" | "telegram" | "telegram-user" | "mattermost";
 type PickerOption = Platform | "file";
 
 /** Tab slug as it appears in the URL: ``/settings/<slug>``. */
@@ -65,6 +66,10 @@ const PLATFORM_OPTIONS: { value: PickerOption; label: string; description: strin
   { value: "discord", label: "Discord", description: "Connect a Discord server", Icon: DiscordIcon },
   { value: "teams", label: "Microsoft Teams", description: "Connect a Teams tenant", Icon: MonitorSmartphone },
   { value: "mattermost", label: "Mattermost", description: "Connect a Mattermost server", Icon: MattermostIcon },
+  // Telegram ingestion runs through a user (MTProto) session: a bot token
+  // cannot read group history. Requires a session string from
+  // `scripts/telegram_login.py`.
+  { value: "telegram-user", label: "Telegram", description: "Ingest Telegram groups via a user account", Icon: Send },
   { value: "file", label: "File Import", description: "Upload a CSV / TSV / JSONL chat export", Icon: FileText },
 ];
 

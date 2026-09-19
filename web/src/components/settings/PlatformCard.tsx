@@ -43,6 +43,7 @@ const PLATFORM_META: Record<
   discord: { label: "Discord", Icon: DiscordIcon },
   teams: { label: "Microsoft Teams", Icon: MonitorSmartphone },
   telegram: { label: "Telegram", Icon: Send },
+  "telegram-user": { label: "Telegram (user account)", Icon: Send },
   mattermost: { label: "Mattermost", Icon: MattermostIcon },
   file: { label: "Uploaded files (CSV / TSV / JSONL)", Icon: FileText },
 };
