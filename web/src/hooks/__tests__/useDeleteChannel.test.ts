@@ -83,11 +83,11 @@ describe("useDeleteChannel", () => {
     expect(init?.method).toBe("DELETE");
   });
 
-  it("encodes special characters in channelName confirm param", async () => {
+  it("encodes the channel id in the request path", async () => {
     const fetchMock = vi.mocked(globalThis.fetch);
     fetchMock.mockResolvedValue(
       makeResponse(
-        { channel_id: "ch-2", status: "completed", counts: {}, errors: {} },
+        { channel_id: "ch/2", status: "completed", counts: {}, errors: {} },
         true,
         200,
       ),
@@ -96,7 +96,7 @@ describe("useDeleteChannel", () => {
     const { result } = renderHook(() => useDeleteChannel());
 
     await act(async () => {
-      await result.current.remove("ch-2", "my channel & stuff");
+      await result.current.remove("ch/2", "my channel & stuff");
     });
 
     const [url] = fetchMock.mock.calls[0];

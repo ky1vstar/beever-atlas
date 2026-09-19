@@ -133,9 +133,7 @@ def test_validate_proxy_url_accepts_opaque_handle_without_dns(monkeypatch):
         raise AssertionError("DNS must not be resolved for an opaque handle host")
 
     monkeypatch.setattr(socket, "getaddrinfo", _boom)
-    encoded = http_safe.validate_proxy_url(
-        "https://tg.invalid/conn-1/-1001659373068_46074/168494"
-    )
+    encoded = http_safe.validate_proxy_url("https://tg.invalid/conn-1/-1001659373068_46074/168494")
     # The caller must use the percent-encoded form when building the bridge URL.
     assert "tg.invalid" in encoded
     assert "%2F" in encoded

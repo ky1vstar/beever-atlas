@@ -335,9 +335,7 @@ async def _with_real_reply_counts(
     if not counts:
         return messages
     return [
-        m.model_copy(update={"reply_count": counts[m.message_id]})
-        if m.message_id in counts
-        else m
+        m.model_copy(update={"reply_count": counts[m.message_id]}) if m.message_id in counts else m
         for m in messages
     ]
 
