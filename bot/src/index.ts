@@ -2,9 +2,12 @@ import { config } from "dotenv";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { loadSecretsDir } from "./secrets-dir.js";
 
 // Load .env from project root (one level up from bot/)
 config({ path: resolve(import.meta.dirname, "../../.env") });
+// Docker/Swarm secrets — lowest priority, only fills vars .env/shell left unset.
+loadSecretsDir(process.env.BEEVER_SECRETS_DIR);
 import { Chat } from "chat";
 import { renderResponse } from "./renderer.js";
 import { fetchSSEWithRetry } from "./sse-client.js";

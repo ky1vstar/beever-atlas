@@ -1,6 +1,7 @@
 """Application configuration loaded from environment variables."""
 
 import logging
+import os
 from functools import lru_cache
 from typing import ClassVar, Literal
 
@@ -75,6 +76,11 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": ".env",
         "env_file_encoding": "utf-8",
+        # Docker/Swarm secrets: each file in this dir is read as one setting —
+        # filename (or alias) is the var name, file contents is the value.
+        # Precedence: env var > .env > secrets_dir. Unset by default so local
+        # dev/CI never warns about a missing directory.
+        "secrets_dir": os.getenv("BEEVER_SECRETS_DIR") or None,
         "extra": "ignore",
         "populate_by_name": True,
     }

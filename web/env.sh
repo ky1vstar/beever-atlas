@@ -19,6 +19,23 @@ set -eu
 # Deliberately NOT prefixed VITE_ so it isn't swept up by the loop below.
 ASSET_DIR="${RUNTIME_ASSET_DIR:-/usr/share/nginx/html}"
 
+# 0. Docker/Swarm secrets (BEEVER_SECRETS_DIR) — lowest priority, only fills a
+#    VITE_* var the environment didn't already set. Mirrors the backend's
+#    `secrets_dir` and the bot's `loadSecretsDir`: filename is the var name,
+#    file contents (trimmed) is the value.
+if [ -n "${BEEVER_SECRETS_DIR:-}" ] && [ -d "$BEEVER_SECRETS_DIR" ]; then
+    for f in "$BEEVER_SECRETS_DIR"/*; do
+        [ -f "$f" ] || continue
+        name=$(basename "$f")
+        echo "$name" | grep -Eq '^VITE_[A-Za-z0-9_]+$' || continue
+        eval "already=\${$name+set}"
+        [ "${already:-}" = "set" ] && continue
+        value=$(cat "$f")
+        export "$name=$value"
+        echo "env.sh: loaded secret ${name} from ${BEEVER_SECRETS_DIR}"
+    done
+fi
+
 # 1. Replace the sentinel for every VITE_* var present in the environment.
 for var in $(env | sed -n 's/^\(VITE_[A-Za-z0-9_]*\)=.*/\1/p'); do
     # BusyBox ash has no ${!var}; use eval for indirect expansion.
